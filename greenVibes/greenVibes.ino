@@ -3,12 +3,12 @@
 #include "I2Cdev.h"
 #include "MPU6050_6Axis_MotionApps20.h"
 
-#define LCD_D4  4
-#define LCD_D5  5
-#define LCD_D6  6
-#define LCD_D7  7
-#define LCD_EN  8
-#define LCD_RS  9
+#define LCD_D4  6
+#define LCD_D5  7
+#define LCD_D6  8
+#define LCD_D7  9
+#define LCD_EN  5
+#define LCD_RS  4
 
 #define TS        10    // sampling period in ms
 #define MEAN_SIZE 1000  // Number of samples for mean power calculation
@@ -22,8 +22,11 @@ float voltage, current;
 unsigned long curTime,lastTime;
 int samplesNb;
 float power;
-bool newElecSample, newMpuSample;
+bool newMpuSample;
 VectorInt16 acc;
+float period, lastCrossingTime;
+int lastSign;
+
 
 typedef enum {
   DISCONNECTED,
@@ -86,10 +89,12 @@ void setup() {
   Serial.begin(115200);
   samplesNb = 0;
   power = 0;
-  newElecSample = false;
   newMpuSample = false;
   state = DISCONNECTED;
   lastTime = millis();
+  lastCrossingTime = -1;
+  lastSign = 0;
+  period = 0;
 }
 
 void loop() {
@@ -101,7 +106,7 @@ void loop() {
     if (c == 'S') {
       samplesNb = 0;
       power = 0;
-      newElecSample = false;
+      lastTime = millis() - TS;
       state = CONNECTED;
     }
     else if (c == 'E') {
@@ -115,9 +120,9 @@ void loop() {
     voltage = readVoltage();
     current = readCurrent();
     lastTime += TS;
-    newElecSample = true;
     samplesNb++;
     power += voltage*current;
+    
     if (samplesNb >= MEAN_SIZE) {
       samplesNb = 0;
       power = (power*1000)/MEAN_SIZE;
@@ -129,6 +134,10 @@ void loop() {
       lcd.print(power);
       lcd.print(" mW");
       power = 0;
+      lcd.setCursor(0, 1);
+      lcd.print("f = ");
+      lcd.print(1000/period);
+      lcd.print(" Hz");
     }
   }
 
@@ -136,24 +145,43 @@ void loop() {
   if (mpuAvailable()) {
     acc = mpuRead();
     newMpuSample = true;
+    if (lastSign == 0) {
+      if (acc.y < 0) {
+        lastSign = -1;
+      } else {
+        lastSign = 1;
+      }
+    } else {
+      if  ( (lastSign < 0) && (acc.y > 0) ) {
+        lastSign = 1;
+        if (lastCrossingTime < 0) {
+          lastCrossingTime = curTime;
+        }
+        else {
+          if ( (curTime - lastCrossingTime > 100) && (curTime - lastCrossingTime < 2000) ) {
+            period = curTime - lastCrossingTime;
+            lastCrossingTime = curTime;
+          }
+        }
+      }
+      else if ( (lastSign > 0) && (acc.y < 0) ) {
+        lastSign = -1;
+      }
+    }
   }
 
   if (state == DISCONNECTED) {
     // nothing to do;
   }
   else if (state == CONNECTED) {
-    if (newElecSample) {
-      newElecSample = false;
-      Serial.write(0xF0);
-      Serial.write((byte*)&voltage, 4);
-      Serial.write((byte*)&current, 4);
-    }
     if (newMpuSample) {
       newMpuSample = false;
       Serial.write(0x55);
       Serial.write((byte*)&acc.x, 2);
       Serial.write((byte*)&acc.y, 2);
       Serial.write((byte*)&acc.z, 2);
+      Serial.write((byte*)&voltage, 4);
+      Serial.write((byte*)&current, 4);
     }
   }
 }
@@ -185,7 +213,7 @@ float readCurrent() {
 }
 
 
-void mpuSetup() {  
+void mpuSetup() {
   // join I2C bus (I2Cdev library doesn't do this automatically)
   Wire.begin();
   // initialize device
